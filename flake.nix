@@ -25,6 +25,7 @@
 
       lib = {
         inherit flags;
+        parity = import ./lib/parity.nix;
         # The v3 package set of any nixpkgs source, the way the module builds
         # it (checks, benchmarks, ad-hoc `nix build`).
         pkgsV3 =

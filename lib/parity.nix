@@ -30,6 +30,7 @@
     binutils = "no codegen effect on the output of other packages";
     libtool = "build tool, no codegen effect";
     linux-headers = "headers only";
+    nvidia-open = "kernel module of the CachyOS kernel set (nix-cachyos-kernel with its own nixpkgs, already v3); untouched";
   };
 
   notPorted = {
