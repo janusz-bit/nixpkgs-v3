@@ -1,5 +1,5 @@
 # CachyOS per-package parity beyond the global flags, for packages of the
-# cachyos-v3 repository that are in the laptop's closure (lib/parity.nix
+# cachyos-v3 repository that are in the laptop's closure (modules/_data/parity.nix
 # lists what is ported, what is equivalent already and what is not, with the
 # reason). Every entry here must build and pass its tests in the world build.
 _flags: _final: prev:

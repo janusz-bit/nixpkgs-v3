@@ -8,15 +8,15 @@
 # every buildGoModule and buildRustPackage picks them up without per-package
 # changes.
 #
-# Check: `go env GOAMD64` of the overlaid go prints v3; the rustc wrapper
-# script contains -C target-cpu=x86-64-v3 (nix eval in checks/).
+# Check: `nix build .#checks.x86_64-linux.toolchain` (modules/checks.nix)
+# asserts GOAMD64=v3 on every go_1_N and -C target-cpu in the rustc wrapper.
 flags: _final: prev:
 let
   # Go versions of the pinned nixpkgs, listed by hand: deriving them from
   # `builtins.attrNames prev` makes this overlay's attribute names depend on
   # the package set it extends (infinite recursion once another overlay's
-  # names depend on `final`). checks/toolchain.nix fails when nixpkgs gains a
-  # go_1_N that is missing here.
+  # names depend on `final`). checks.x86_64-linux.toolchain fails when
+  # nixpkgs gains a go_1_N that is missing here.
   goVersions = [
     "go_1_26"
     "go_1_27"

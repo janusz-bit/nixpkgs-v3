@@ -1,6 +1,6 @@
 # Generic fallbacks: packages taken from the baseline (x86-64) package set of
 # the same nixpkgs revision instead of being rebuilt for v3, each with its
-# reason in lib/parity.nix. They come from cache.nixos.org, so they cost the
+# reason in modules/_data/parity.nix. They come from cache.nixos.org, so they cost the
 # world build nothing.
 #
 # Only three kinds qualify:

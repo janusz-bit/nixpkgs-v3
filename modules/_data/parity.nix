@@ -1,7 +1,7 @@
 # What the overlay does about each CachyOS-specific package (the cachyos-v3
 # repository, built from CachyOS-PKGBUILDS) and about generic fallbacks, as
-# data for docs/status.md (`nix run .#v3ci -- status`). overlay/cachyos.nix
-# and overlay/fallbacks.nix implement the `ported` and `fallbacks` entries;
+# data for docs/status.md (`nix run .#v3ci -- status`). _overlay/cachyos.nix
+# and _overlay/fallbacks.nix implement the `ported` and `fallbacks` entries;
 # keep the three in step.
 #
 # Keys are nixpkgs pnames; `cachyos` names the CachyOS package base when it

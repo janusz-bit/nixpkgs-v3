@@ -5,7 +5,7 @@
 # gcc.arch = "x86-64-v3" (the NixOS module sets both). On a baseline set it
 # would still change go/rustc/zig and rebuild their users for no gain.
 let
-  flags = import ../lib/flags.nix;
+  flags = import ../_data/flags.nix;
 in
 final: prev:
 let

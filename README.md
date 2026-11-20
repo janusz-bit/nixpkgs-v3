@@ -21,13 +21,19 @@ thousands of packages locally.
 
 ## What it does
 
+The flake is built like janusz-bit/nixos: flake-parts plus import-tree, so
+every `.nix` file under `modules/` is a flake-parts module and `_`-prefixed
+paths (`modules/_data`, `_overlay`, `_tools`) hold what the modules load.
+Consumers set `follows` for `nixpkgs`, `flake-parts`, `import-tree`,
+`git-hooks-nix` and `github-actions-nix`.
+
 | Layer | File | Effect |
 |---|---|---|
-| Platform | `module.nix` | `nixpkgs.hostPlatform = { system = "x86_64-linux"; gcc.arch = "x86-64-v3"; gcc.tune = "generic"; }`: cc-wrapper adds `-march=x86-64-v3 -mtune=generic` to every gcc, g++, gfortran and clang call, gcc itself is configured `--with-arch=x86-64-v3`, every derivation requires the system feature `gccarch-x86-64-v3`. |
-| Toolchains | `overlay/toolchain.nix` | nixpkgs has no v3 handling for Go or Rust: `GOAMD64=v3` is baked into every `go_1_N` (becomes the toolchain default), the rustc/rustdoc wrapper gets `-C target-cpu=x86-64-v3`. |
-| CachyOS parity | `overlay/cachyos.nix`, `lib/parity.nix` | Per-package changes of the CachyOS-specific packages (python PGO, `-O3` for xz and sqlite); what is already equivalent or not ported, with reasons. |
-| Fallbacks | `overlay/fallbacks.nix` | A few leaf applications, Haskell, .NET and firmware from the baseline set (cache.nixos.org), each with its reason. |
-| Flags as data | `lib/flags.nix` | CachyOS v3 makepkg flags, verbatim from `CachyOS/docker-makepkg` (`docker-makepkg-v3/makepkg.conf`, `rust.conf`). |
+| Platform | `modules/nixos.nix` (`nixosModules.default`) | `nixpkgs.hostPlatform = { system = "x86_64-linux"; gcc.arch = "x86-64-v3"; gcc.tune = "generic"; }`: cc-wrapper adds `-march=x86-64-v3 -mtune=generic` to every gcc, g++, gfortran and clang call, gcc itself is configured `--with-arch=x86-64-v3`, every derivation requires the system feature `gccarch-x86-64-v3`. |
+| Toolchains | `modules/_overlay/toolchain.nix` | nixpkgs has no v3 handling for Go or Rust: `GOAMD64=v3` is baked into every `go_1_N` (becomes the toolchain default), the rustc/rustdoc wrapper gets `-C target-cpu=x86-64-v3`. |
+| CachyOS parity | `modules/_overlay/cachyos.nix`, `modules/_data/parity.nix` | Per-package changes of the CachyOS-specific packages (python PGO, `-O3` for xz and sqlite); what is already equivalent or not ported, with reasons. |
+| Fallbacks | `modules/_overlay/fallbacks.nix` | A few leaf applications, Haskell, .NET and firmware from the baseline set (cache.nixos.org), each with its reason. |
+| Flags as data | `modules/_data/flags.nix` (`lib.flags`) | CachyOS v3 makepkg flags, verbatim from `CachyOS/docker-makepkg` (`docker-makepkg-v3/makepkg.conf`, `rust.conf`). |
 
 Prior art checked: nixpkgs has no `pkgsx86_64_v3` variant (only
 `lib.systems.architectures` knows the levels). Chaotic-Nyx (an input of
@@ -53,7 +59,7 @@ RUSTFLAGS="-C opt-level=3 -C target-cpu=x86-64-v3 -Clink-arg=-z -Clink-arg=pack-
 | Flag | Here | Why |
 |---|---|---|
 | `-march=x86-64-v3 -mtune=generic` | global | hostPlatform `gcc.arch`/`gcc.tune` |
-| `GOAMD64=v3`, `-C target-cpu=x86-64-v3` | global | overlay/toolchain.nix |
+| `GOAMD64=v3`, `-C target-cpu=x86-64-v3` | global | modules/_overlay/toolchain.nix |
 | `-O3` | per package | `NIX_CFLAGS_COMPILE` comes before a package's own flags, so a global `-O3` would lose to every `-O2` a build system adds and only change the packages that pick no level. Where it matters it is set per package (`CFLAGS=-O3`); CMake Release (zstd) and CPython already use `-O3`. |
 | LTO (`-flto=auto`) | not global | LTO across the whole nixpkgs closure breaks static archives and doubles memory; nixpkgs already uses LTO where packages support it (CPython `--with-lto`, gcc, Firefox). |
 | `-mpclmul` | not ported | Not part of any ISA level; the libraries that use PCLMULQDQ (zlib-ng, crc32 code in zstd/xz) dispatch at run time anyway, and adding it needs a replaced stdenv. |
@@ -104,8 +110,8 @@ rebuild them.
 
 So the planner reads the repository variable `CACHIX_QUOTA_GB` (default 5)
 and, while the estimated remaining world exceeds 80 % of it, builds one
-bounded share (40 % of the quota) per run and stops the chain, with the
-reason in the run summary. Source copies and vendored crates
+bounded share (40 % of the quota) once per janusz-bit/nixos revision and
+stops the chain, with the reason in the run summary. Source copies and vendored crates
 (`-src`, `-vendor`, `-source`) are never pushed (rebuilt in seconds where
 needed), and data without code (linux-firmware) comes from cache.nixos.org.
 
@@ -121,7 +127,9 @@ runs is re-fetched and so kept warm.
 
 ## The world build (CI)
 
-`.github/workflows/build.yml`, every 4 hours, on pushes here and by hand:
+`.github/workflows/build.yml` (generated from `modules/github-actions.nix`
+with github-actions-nix, `nix run .#sync-github-actions`), every 4 hours, on
+pushes here and by hand:
 
 1. **plan**: resolves janusz-bit/nixos `master` (or `nixos_ref`), evaluates
    `ci#v3` (the laptop's `nixosConfigurations.nixos` with its own flake.lock;
@@ -132,7 +140,8 @@ runs is re-fetched and so kept warm.
    first, each node on the runner where it can start earliest, preferring
    the runner that builds its heaviest input; nodes that would end after
    5 h 15 min are deferred to the next run.
-2. **build** (matrix, one job per runner): checks that the CPU runs v3 code,
+2. **build** (matrix of 16 runners; a runner without work in the plan skips
+   its steps): checks that the CPU runs v3 code,
    moves `/nix` to the larger `/mnt` disk, evaluates the same target (and
    fails if the drvPath differs from the plan), then builds its share in plan
    order, two builds at a time. An input that another runner builds is
@@ -174,7 +183,7 @@ otherwise stops with a notice:
 
 - `ci#packages.x86_64-linux.isa-proof` scans zstd, xz, python3, libc.so.6,
   fish (Rust) and tailscaled (Go) of both builds with `isa-scan`
-  (`tools/isa-scan.sh`: GNU ISA-level note, count of instructions that
+  (`modules/_tools/isa-scan.sh`: GNU ISA-level note, count of instructions that
   x86-64-v2 lacks) and fails unless each v3 file is clearly v3;
 - `ci#packages.x86_64-linux.bench` runs hyperfine A/B on the runner: zstd -19
   and decompression, xz -6 and decompression, a pure-Python workload,
@@ -193,17 +202,24 @@ Filled in from the runs as they finish.
   browser and dictionary plasmoids, OpenConnect SAML login) so qtwebengine
   stays only in leaf applications that can fall back, or a larger runner.
 - CachyOS PGO for bash, zstd, xz, lz4, sqlite, ripgrep and svt-av1, BOLT and
-  PGO for LLVM, LTO for nodejs, zlib-ng as zlib: listed in `lib/parity.nix`,
-  not ported.
+  PGO for LLVM, LTO for nodejs, zlib-ng as zlib: listed in
+  `modules/_data/parity.nix`, not ported.
 
 ## Development
 
 ```sh
-nix fmt                                  # nixfmt-tree
-nix build .#checks.x86_64-linux.lint     # nixfmt, statix, deadnix, actionlint
-nix build .#checks.x86_64-linux.toolchain  # evaluation-only assertions
-nix eval --raw ./ci#v3.drvPath           # the world target (minutes)
+nix develop                                   # installs the pre-commit hooks
+nix fmt                                       # nixfmt-tree
+nix build .#checks.x86_64-linux.pre-commit    # nixfmt, statix, deadnix, actionlint, workflows up to date
+nix build .#checks.x86_64-linux.toolchain     # evaluation-only assertions
+nix run .#sync-github-actions                 # regenerate .github/workflows
+nix eval --raw ./ci#v3.drvPath                # the world target (minutes)
 ```
+
+After a change of the root flake's inputs, run
+`nix flake update nixpkgs-v3 --flake ./ci`: ci/flake.lock keeps the old
+input list of the relative `..` input otherwise, and the world target fails
+to evaluate (`attribute 'flake-parts' missing`).
 
 The root flake has no janusz-bit/nixos input (that flake imports this one;
 inputs in both directions are a lock cycle); the composition lives in

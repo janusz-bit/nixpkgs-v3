@@ -638,6 +638,22 @@
     },
     "nixpkgs-v3": {
       "inputs": {
+        "flake-parts": [
+          "nixos",
+          "flake-parts"
+        ],
+        "git-hooks-nix": [
+          "nixos",
+          "git-hooks-nix"
+        ],
+        "github-actions-nix": [
+          "nixos",
+          "github-actions-nix"
+        ],
+        "import-tree": [
+          "nixos",
+          "import-tree"
+        ],
         "nixpkgs": [
           "nixos",
           "nixpkgs"

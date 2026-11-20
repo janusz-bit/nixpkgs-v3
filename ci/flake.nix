@@ -7,8 +7,17 @@
   # so the lock below is only the default for local use.
   inputs = {
     nixos.url = "github:janusz-bit/nixos";
-    nixpkgs-v3.url = "path:..";
-    nixpkgs-v3.inputs.nixpkgs.follows = "nixos/nixpkgs";
+    # The same follows as janusz-bit/nixos sets on its nixpkgs-v3 input.
+    nixpkgs-v3 = {
+      url = "path:..";
+      inputs = {
+        nixpkgs.follows = "nixos/nixpkgs";
+        flake-parts.follows = "nixos/flake-parts";
+        import-tree.follows = "nixos/import-tree";
+        git-hooks-nix.follows = "nixos/git-hooks-nix";
+        github-actions-nix.follows = "nixos/github-actions-nix";
+      };
+    };
   };
 
   outputs =
