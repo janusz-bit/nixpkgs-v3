@@ -1,0 +1,10 @@
+{
+  "last": {
+    "built": 0,
+    "failed": 0,
+    "skipped": 0,
+    "remaining": 5424,
+    "nixos_rev": "aa06df016abce7f094194bd2a93c0067f4aafe1e",
+    "run": "https://github.com/janusz-bit/nixpkgs-v3/actions/runs/44830773049"
+  }
+}
