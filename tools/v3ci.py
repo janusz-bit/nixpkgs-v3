@@ -514,6 +514,14 @@ class Runner:
             self.result[d] = entry
             log(f"[{self.state[d]}] {name} in {seconds}s")
             del self.running[d]
+            self.save()
+
+    def save(self):
+        """Results so far: a cancelled or timed-out job keeps what it measured."""
+        tmp = self.args.results + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.result, f)
+        os.replace(tmp, self.args.results)
 
     def step(self):
         """Launch what is ready; return False when nothing can happen any more."""
@@ -562,8 +570,7 @@ class Runner:
         for d, s in self.state.items():
             if s == "pending":
                 self.result[d] = {"name": self.nodes[d]["name"], "status": "skipped", "reason": "out of time"}
-        with open(self.args.results, "w", encoding="utf-8") as f:
-            json.dump(self.result, f)
+        self.save()
         counts = {}
         for r in self.result.values():
             counts[r["status"]] = counts.get(r["status"], 0) + 1
