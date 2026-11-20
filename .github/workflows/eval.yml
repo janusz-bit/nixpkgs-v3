@@ -1,0 +1,40 @@
+# Evaluation: the flake's eval-only checks (toolchain defaults of the v3 set)
+# and the world target, janusz-bit/nixos master with this module, so a module
+# change that breaks the laptop's evaluation fails here and not on the
+# laptop. Prints the derivation counts of the target. No secrets.
+name: eval
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.35.6/install
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
+            extra-substituters = https://janusz-bit.cachix.org
+            extra-trusted-public-keys = janusz-bit.cachix.org-1:4stTiufAF02BAXw8HNvYslAmUlPbZPIRhIGht0gSMoo=
+            extra-system-features = gccarch-x86-64 gccarch-x86-64-v2 gccarch-x86-64-v3
+      - name: Flake checks (evaluation only)
+        run: nix flake check --no-build --all-systems
+      - name: Toolchain assertions
+        run: nix build .#checks.x86_64-linux.toolchain
+      - name: World target
+        run: |
+          rev=$(git ls-remote https://github.com/janusz-bit/nixos refs/heads/master | cut -f1)
+          drv=$(nix eval --raw ./ci#v3.drvPath --override-input nixos "github:janusz-bit/nixos/$rev")
+          echo "janusz-bit/nixos@$rev v3 toplevel: \`$drv\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "derivations in the build closure: $(nix-store -qR "$drv" | grep -c '\.drv$')" >> "$GITHUB_STEP_SUMMARY"

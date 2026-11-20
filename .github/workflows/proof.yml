@@ -1,0 +1,55 @@
+# Proof that the v3 world is v3 (ELF scan of sample binaries, generic against
+# v3) and the A/B benchmark (zstd, xz, python3, ffmpeg). Both stop with a
+# notice while the sample packages are not in cachix yet, rather than
+# building the world on one runner. No push, no secrets.
+name: proof
+
+on:
+  schedule:
+    - cron: "43 5 * * *"
+  workflow_dispatch:
+    inputs:
+      nixos_ref:
+        description: "janusz-bit/nixos branch, tag or commit"
+        default: master
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Runner CPU
+        run: grep -m1 'model name' /proc/cpuinfo | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.35.6/install
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
+            extra-substituters = https://janusz-bit.cachix.org
+            extra-trusted-public-keys = janusz-bit.cachix.org-1:4stTiufAF02BAXw8HNvYslAmUlPbZPIRhIGht0gSMoo=
+            extra-system-features = gccarch-x86-64 gccarch-x86-64-v2 gccarch-x86-64-v3
+      - id: ready
+        run: |
+          ref=${{ inputs.nixos_ref || 'master' }}
+          rev=$(git ls-remote https://github.com/janusz-bit/nixos "$ref" "refs/heads/$ref" | head -1 | cut -f1)
+          echo "flags=--override-input nixos github:janusz-bit/nixos/${rev:-$ref}" >> "$GITHUB_OUTPUT"
+          for attr in isa-proof bench; do
+            drv=$(nix eval --raw "./ci#packages.x86_64-linux.$attr.drvPath" --override-input nixos "github:janusz-bit/nixos/${rev:-$ref}")
+            # Allow the proof derivations themselves and small wrappers, not v3 packages.
+            n=$(nix-store --realise --dry-run "$drv" 2>&1 | awk '/will be built/ {s=1; next} /will be fetched/ {s=0} s && /\/nix\/store/' | grep -vc -e nixpkgs-v3- -e '-bench\.py' -e 'hyperfine' || true)
+            echo "$attr needs $n builds" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$attr=$n" >> "$GITHUB_OUTPUT"
+          done
+      - name: ELF scan
+        if: steps.ready.outputs.isa-proof == '0'
+        run: |
+          nix build -L ./ci#packages.x86_64-linux.isa-proof ${{ steps.ready.outputs.flags }}
+          cat result/isa.md >> "$GITHUB_STEP_SUMMARY"
+      - name: A/B benchmark
+        if: steps.ready.outputs.bench == '0'
+        run: nix run ./ci#packages.x86_64-linux.bench ${{ steps.ready.outputs.flags }} | tee -a "$GITHUB_STEP_SUMMARY"
