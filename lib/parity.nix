@@ -53,6 +53,8 @@
     firefox = "nixpkgs builds Firefox with PGO and LTO, far beyond 6 h on 4 vCPUs; leaf application, wrapper included";
     libreoffice-qt = "5-7 h on 4 vCPUs; leaf application";
     freecad-qt6 = "pulls qtwebengine through pyside6; leaf application";
+    pinta = ".NET application: RyuJIT emits code for the running CPU, and the source-built .NET SDK behind it takes 3+ h";
+    linux-firmware = "firmware blobs, no CPU code; a v3 copy would only take 2 GB of cachix";
     haskell = "haskellPackages, pandoc, shellcheck: GHC's code generator ignores -march, so v3 would rebuild identical code; separate processes and mostly build tools";
   };
 }

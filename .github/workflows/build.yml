@@ -56,6 +56,9 @@ env:
   CACHE_NAME: janusz-bit
   CACHE_URL: https://janusz-bit.cachix.org
   MAX_CHAIN: "40"
+  # Cheap intermediates (source copies, vendored crates): never pushed
+  # (cachix pushFilter) and rebuilt by whichever runner needs them.
+  LOCAL_ONLY: "(-src|-vendor|-source)(-[0-9][^-]*)?$"
 
 jobs:
   plan:
@@ -67,7 +70,7 @@ jobs:
       nixos_rev: ${{ steps.rev.outputs.nixos_rev }}
       drv: ${{ steps.eval.outputs.drv }}
       push: ${{ steps.secret.outputs.push }}
-      started: ${{ steps.rev.outputs.started }}
+      capped: ${{ steps.plan.outputs.capped }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - id: secret
@@ -90,7 +93,6 @@ jobs:
           rev=$(git ls-remote "https://github.com/$NIXOS_REPO" "$ref" "refs/heads/$ref" | head -1 | cut -f1)
           [ -n "$rev" ] || rev=$ref
           echo "nixos_rev=$rev" >> "$GITHUB_OUTPUT"
-          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
           echo "Target: $NIXOS_REPO@$rev, nixpkgs-v3@$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
       - id: eval
         run: |
@@ -101,10 +103,15 @@ jobs:
       - id: plan
         run: |
           if [ "${{ steps.secret.outputs.push }}" = true ]; then machines=${{ inputs.machines || '16' }}; budget=18900; else machines=1; budget=7200; fi
+          generic=$(nix eval --raw ./ci#generic.drvPath --override-input nixos "github:$NIXOS_REPO/${{ steps.rev.outputs.nixos_rev }}" 2>/dev/null || true)
           nix run .#v3ci -- plan --drv "${{ steps.eval.outputs.drv }}" --cache "$CACHE_URL" \
-            --machines "$machines" --budget "$budget" --times build-times.json --out plan.json > plan-out.json
-          echo "matrix=$(jq -c .matrix plan-out.json)" >> "$GITHUB_OUTPUT"
-          echo "real=$(jq .real plan-out.json)" >> "$GITHUB_OUTPUT"
+            --machines "$machines" --budget "$budget" --times build-times.json --out plan.json \
+            --quota-gb "${{ vars.CACHIX_QUOTA_GB || '5' }}" --local-only "$LOCAL_ONLY" ${generic:+--generic "$generic"} > plan-out.json
+          {
+            echo "matrix=$(jq -c .matrix plan-out.json)"
+            echo "real=$(jq .real plan-out.json)"
+            echo "capped=$(jq .capped plan-out.json)"
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: plan
@@ -180,6 +187,7 @@ jobs:
           name: ${{ env.CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skipPush: ${{ needs.plan.outputs.push != 'true' }}
+          pushFilter: ${{ env.LOCAL_ONLY }}
       - name: Evaluate the same target
         run: |
           drv=$(nix eval --raw ./ci#v3.drvPath --override-input nixos "github:$NIXOS_REPO/${{ needs.plan.outputs.nixos_rev }}")
@@ -194,7 +202,7 @@ jobs:
           # cachix daemon to finish pushing before the 6 h job limit.
           deadline=$(( $(date +%s) + 18900 ))
           ./v3ci/bin/v3ci execute --plan plan.json --machine ${{ matrix.machine }} --deadline "$deadline" \
-            --plan-start "${{ needs.plan.outputs.started }}" --slack 1800 --jobs 2 --cores 4 \
+            --jobs 2 --cores 4 \
             ${{ needs.plan.outputs.push == 'true' && '--remote' || '--no-remote' }} \
             --logs logs --results results-${{ matrix.machine }}.json
       - if: always()
@@ -248,7 +256,7 @@ jobs:
           git add build-times.json status.json
           git commit -qm "ci-state: build times of run $GITHUB_RUN_ID" && git push origin ci-state
       - name: Dispatch the next run
-        if: needs.plan.outputs.push == 'true' && steps.fin.outputs.built != '0'
+        if: needs.plan.outputs.push == 'true' && needs.plan.outputs.capped != 'true' && steps.fin.outputs.built != '0'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

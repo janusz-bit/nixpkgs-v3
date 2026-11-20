@@ -37,20 +37,24 @@ import urllib.request
 
 STORE = "/nix/store/"
 
-# Seconds on a 4-vCPU ubuntu-latest runner, used until a build was measured.
-# Measured times (build-times.json) win. Order matters: first match.
-HEURISTICS = [
-    (r"^(chromium|ungoogled-chromium|electron)(-unwrapped)?$", 14 * 3600),
-    (r"^(qtwebengine|libcef|cef)$", 9 * 3600),
-    (r"^(firefox|thunderbird|librewolf)(-unwrapped)?$", 5 * 3600),
-    (r"^(webkitgtk|libreoffice|torch|pytorch|tensorflow)", 4 * 3600),
-    (r"^(ghc|onnxruntime|triton|llvm|mlir|flang)$", 7200),
-    (r"^(rustc-unwrapped|rustc|clang|gcc|nodejs|spidermonkey|opencv)", 4000),
-    (r"^(qtbase|qtdeclarative|mesa|boost|openjdk|go|gtk4|gtk\+3|vtk)$", 2400),
-    (r"^(python3|glibc|ffmpeg|ffmpeg-full|perl|cmake|binutils|systemd)$", 1500),
-    (r"-(bootstrap|stage[0-9]).*$", 600),
-]
+# Seconds on a 4-vCPU ubuntu-latest runner for a whole pname, used until a
+# build was measured; measured times (build-times.json) win. Wrappers
+# (gcc-wrapper, firefox) are not here on purpose: they take seconds.
+HEURISTICS = {
+    **dict.fromkeys(["ungoogled-chromium-unwrapped", "chromium-unwrapped", "electron-unwrapped"], 14 * 3600),
+    # Above the budget's reach on paper, but worth one attempt: a timeout is
+    # recorded and makes it "too big" from then on.
+    "qtwebengine": 5 * 3600,
+    **dict.fromkeys(["firefox-unwrapped", "thunderbird-unwrapped", "libreoffice"], 6 * 3600),
+    **dict.fromkeys(["webkitgtk", "onnxruntime", "dotnet-vmr", "dotnet-stage0-vmr"], 3 * 3600),
+    **dict.fromkeys(["ghc", "llvm", "mlir", "flang", "openvino", "opencv"], 7200),
+    **dict.fromkeys(["rustc-unwrapped", "clang", "gcc", "nodejs-slim", "spidermonkey", "qtbase", "openjdk"], 3600),
+    **dict.fromkeys(["xgcc", "glibc", "mesa", "qtdeclarative", "boost", "go", "gtk4", "gtk+3", "python3", "zed-editor"], 1800),
+    **dict.fromkeys(["perl", "cmake", "binutils", "systemd", "ffmpeg", "ffmpeg-full", "ffmpeg-headless"], 900),
+}
 DEFAULT_SECONDS = 240
+# Compressed NAR bytes per node when nothing is known (median-ish package).
+DEFAULT_BYTES = 20 * 2**20
 
 VERSION_RE = re.compile(r"-[0-9][^-]*.*$")
 
@@ -206,10 +210,7 @@ def estimate(name, times):
     p = pname(name)
     if p in times.get("pname", {}):
         return times["pname"][p]
-    for pattern, seconds in HEURISTICS:
-        if re.search(pattern, p):
-            return seconds
-    return DEFAULT_SECONDS
+    return HEURISTICS.get(p, DEFAULT_SECONDS)
 
 
 def load_json(path, default):
@@ -222,9 +223,19 @@ def load_json(path, default):
 
 # --- plan ----------------------------------------------------------------------
 
-def build_graph(to_build):
-    """Read every to-build .drv; contract trivial nodes into real edges."""
+def build_graph(to_build, local_only=None):
+    """Read every to-build .drv; contract trivial nodes into real edges.
+
+    local_only (a regex on the name) marks cheap intermediates (source
+    copies, vendored dependencies) that the cachix push filter skips: like
+    trivial nodes they are rebuilt by whoever needs them, never waited for.
+    """
     drvs = {d: read_drv(d) for d in to_build}
+    if local_only:
+        pattern = re.compile(local_only)
+        for info in drvs.values():
+            if pattern.search(info["name"]):
+                info["trivial"] = True
     todo = set(drvs)
     memo = {}
 
@@ -249,7 +260,7 @@ def build_graph(to_build):
     return drvs, nodes
 
 
-def schedule(nodes, machines, budget, delay):
+def schedule(nodes, machines, budget, delay, size_cap=None):
     children = {d: [] for d in nodes}
     for d, info in nodes.items():
         for dep in info["deps"]:
@@ -279,6 +290,7 @@ def schedule(nodes, machines, budget, delay):
     free = [0.0] * machines
     lists = [[] for _ in range(machines)]
     toobig, deferred = [], []
+    pushed = 0
     while ready:
         _, d = heapq.heappop(ready)
         info = nodes[d]
@@ -297,9 +309,10 @@ def schedule(nodes, machines, budget, delay):
             if best is None or key < best[0]:
                 best = (key, m, start)
         _, m, start = best
-        if start + info["est"] > budget:
+        if start + info["est"] > budget or (size_cap is not None and pushed + info["bytes"] > size_cap):
             deferred.append(d)
             continue
+        pushed += info["bytes"]
         info.update(machine=m, start=start, finish=start + info["est"])
         free[m] = info["finish"]
         lists[m].append(d)
@@ -316,12 +329,22 @@ def cmd_plan(args):
     to_build, to_fetch = dry_run(args.drv)
     log(f"dry run: {len(to_build)} to build, {len(to_fetch)} to fetch ({time.time() - t0:.0f}s)")
     times = load_json(args.times, {})
-    drvs, nodes = build_graph(to_build)
+    drvs, nodes = build_graph(to_build, args.local_only)
+    twin = twin_sizes(args.generic, nodes) if args.generic else {}
     for d, info in nodes.items():
         info["est"] = estimate(info["name"], times)
         info["measured"] = info["name"] in times.get("name", {})
         info["machine"] = None
-    lists, toobig, deferred, blocked, bottom = schedule(nodes, args.machines, args.budget, args.delay)
+        nar = times.get("nar", {}).get(info["name"])
+        info["bytes"] = int(nar * COMPRESSION) if nar else twin.get(info["name"], DEFAULT_BYTES)
+    world_bytes = sum(i["bytes"] for i in nodes.values())
+    quota = args.quota_gb * 2**30
+    # With the world larger than the cache, LRU eviction would drop paths of
+    # this very build while it runs. Build a bounded share once and stop the
+    # chain instead of thrashing; the summary says what to change.
+    capped = world_bytes > 0.8 * quota
+    size_cap = 0.4 * quota if capped else None
+    lists, toobig, deferred, blocked, bottom = schedule(nodes, args.machines, args.budget, args.delay, size_cap)
 
     critical = max(bottom.values(), default=0)
     plan = {
@@ -337,6 +360,7 @@ def cmd_plan(args):
         "toobig": toobig,
         "deferred": deferred,
         "blocked": blocked,
+        "capped": capped,
         "stats": {
             "to_build": len(to_build),
             "trivial": len(to_build) - len(nodes),
@@ -346,6 +370,8 @@ def cmd_plan(args):
             "est_runner_hours_total": round(sum(i["est"] for i in nodes.values()) / 3600, 1),
             "critical_path_hours": round(critical / 3600, 1),
             "to_fetch": len(to_fetch),
+            "world_gib": round(world_bytes / 2**30, 1),
+            "quota_gib": args.quota_gb,
         },
     }
     with open(args.out, "w", encoding="utf-8") as f:
@@ -361,6 +387,16 @@ def cmd_plan(args):
         f"- estimate for everything left: {s['est_runner_hours_total']} runner-hours "
         f"({s['est_cpu_hours_total']} CPU-hours), critical path {s['critical_path_hours']} h",
     ]
+    lines.append(f"- estimated compressed size of everything left: {s['world_gib']} GiB; cache quota {args.quota_gb} GiB")
+    if capped:
+        lines += [
+            "",
+            f"> **Cache too small.** The rest of the world (~{s['world_gib']} GiB compressed) does not fit the "
+            f"{args.quota_gb} GiB quota; LRU eviction would throw away this build while it runs. This run builds a "
+            f"bounded share (up to {0.4 * args.quota_gb:.1f} GiB) and does not re-dispatch. Raise the cachix plan, then set "
+            "the repository variable `CACHIX_QUOTA_GB` to its size.",
+            "",
+        ]
     if toobig:
         lines.append(f"- **too big for one {args.budget / 3600:.1f} h job** (need a fallback):")
         lines += [f"  - `{nodes[d]['name']}` (est. {nodes[d]['est'] / 3600:.1f} h)" for d in toobig]
@@ -368,7 +404,29 @@ def cmd_plan(args):
     lines += ["", "| largest estimates | h |", "|---|---|"]
     lines += [f"| `{i['name']}` | {i['est'] / 3600:.2f} |" for i in top]
     summary(args.summary, "\n".join(lines))
-    print(json.dumps({"matrix": matrix, "real": s["real"], "scheduled": s["scheduled"]}))
+    print(json.dumps({"matrix": matrix, "real": s["real"], "scheduled": s["scheduled"], "capped": capped}))
+
+
+COMPRESSION = 0.35  # zstd NAR / NAR, roughly, for a mixed package set
+
+
+def twin_sizes(generic_drv, nodes):
+    """Compressed size of each node's baseline twin on cache.nixos.org."""
+    closure = subprocess.run(["nix-store", "-qR", generic_drv], capture_output=True, text=True, check=True).stdout.split()
+    wanted = {i["name"] for i in nodes.values()}
+    outs = {}
+    for d in closure:
+        if d.endswith(".drv"):
+            info = read_drv(d)
+            if info["name"] in wanted:
+                for o in info["outputs"]:
+                    outs[o] = info["name"]
+    sizes = {}
+    for path, info in path_info("https://cache.nixos.org", outs).items():
+        name = outs.get(path)
+        if name:
+            sizes[name] = sizes.get(name, 0) + (info.get("downloadSize") or info.get("fileSize") or 0)
+    return sizes
 
 
 # --- execute -------------------------------------------------------------------
@@ -402,10 +460,6 @@ class Runner:
         if not self.args.remote:
             # No cache to share through: build it as part of the dependent.
             return "ok"
-        finish = self.nodes[dep].get("finish") or 0
-        grace = max(2700, self.nodes[dep]["est"])
-        if time.time() > self.plan_start + finish + grace + self.args.slack:
-            return "dead"
         return "wait"
 
     def poll_remote(self):
@@ -447,6 +501,9 @@ class Runner:
             name = self.nodes[d]["name"]
             self.state[d] = "built" if ok else "failed"
             entry = {"name": name, "status": self.state[d], "seconds": seconds}
+            if ok:
+                sizes = path_info("auto", self.nodes[d]["outputs"])
+                entry["nar"] = sum(i.get("narSize", 0) for i in sizes.values())
             if not ok:
                 entry["timeout"] = proc.returncode in (124, 137)
                 entry["log"] = tail(os.path.join(self.args.logs, f"{name}.log"), 60)
@@ -466,9 +523,18 @@ class Runner:
                 self.result[d] = {"name": self.nodes[d]["name"], "status": "skipped", "reason": "input missing"}
                 progressed = True
                 continue
-            if "wait" in statuses or len(self.running) >= self.args.jobs:
-                continue
             left = self.deadline - time.time()
+            if "wait" in statuses:
+                # Keep waiting while the node could still finish after its
+                # input arrives; a late runner is not a failed one.
+                need = self.nodes[d]["est"] if self.nodes[d]["measured"] else 300
+                if left < need + 300:
+                    self.state[d] = "skipped"
+                    self.result[d] = {"name": self.nodes[d]["name"], "status": "skipped", "reason": "input not ready in time"}
+                    progressed = True
+                continue
+            if len(self.running) >= self.args.jobs:
+                continue
             # A measured build that cannot finish would only burn the rest
             # of the job; a heuristic estimate is worth the try.
             if left < 300 or (self.nodes[d]["measured"] and self.nodes[d]["est"] > left):
@@ -478,7 +544,6 @@ class Runner:
         return progressed
 
     def run(self):
-        self.plan_start = self.args.plan_start or self.plan["created"]
         last_poll = 0
         while True:
             self.reap()
@@ -526,6 +591,7 @@ def cmd_finalize(args):
     times = load_json(args.times, {})
     times.setdefault("name", {})
     times.setdefault("pname", {})
+    times.setdefault("nar", {})
     built = failed = skipped = 0
     failures = []
     for path in args.results:
@@ -534,6 +600,8 @@ def cmd_finalize(args):
                 built += 1
                 times["name"][r["name"]] = r["seconds"]
                 times["pname"][pname(r["name"])] = r["seconds"]
+                if r.get("nar"):
+                    times["nar"][r["name"]] = r["nar"]
             elif r["status"] == "failed":
                 failed += 1
                 failures.append(r)
@@ -547,7 +615,8 @@ def cmd_finalize(args):
         json.dump(times, f, indent=0, sort_keys=True)
     real = plan.get("stats", {}).get("real", 0)
     remaining = max(real - built, 0)
-    status = {"built": built, "failed": failed, "skipped": skipped, "remaining": remaining}
+    status = {"built": built, "failed": failed, "skipped": skipped, "remaining": remaining,
+              "capped": bool(plan.get("capped"))}
     lines = [
         "## World build",
         "",
@@ -634,6 +703,9 @@ def main():
     p.add_argument("--budget", type=int, default=5 * 3600)
     p.add_argument("--delay", type=int, default=180, help="push + fetch lag between runners")
     p.add_argument("--times", default="build-times.json")
+    p.add_argument("--generic", help="baseline twin toplevel .drv, for size estimates")
+    p.add_argument("--quota-gb", type=float, default=5, help="cachix storage of the plan")
+    p.add_argument("--local-only", help="regex of names rebuilt where needed, never pushed")
     p.add_argument("--out", default="plan.json")
     p.add_argument("--summary", default=os.environ.get("GITHUB_STEP_SUMMARY"))
     p.set_defaults(func=cmd_plan)
@@ -642,8 +714,6 @@ def main():
     e.add_argument("--plan", default="plan.json")
     e.add_argument("--machine", type=int, required=True)
     e.add_argument("--deadline", type=float, required=True, help="epoch seconds")
-    e.add_argument("--plan-start", type=float, default=0)
-    e.add_argument("--slack", type=int, default=0)
     e.add_argument("--jobs", type=int, default=2)
     e.add_argument("--cores", type=int, default=4)
     e.add_argument("--remote", action=argparse.BooleanOptionalAction, default=True)
