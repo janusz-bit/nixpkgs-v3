@@ -1,10 +1,12 @@
 {
   "last": {
-    "built": 0,
-    "failed": 0,
-    "skipped": 0,
-    "remaining": 5424,
-    "nixos_rev": "aa06df016abce7f094194bd2a93c0067f4aafe1e",
-    "run": "https://github.com/janusz-bit/nixpkgs-v3/actions/runs/44830773049"
-  }
+    "built": 318,
+    "failed": 3,
+    "skipped": 351,
+    "remaining": 4499,
+    "capped": true,
+    "cachix_gib": 0.994,
+    "note": "runs 44835468671, 44840381604, 44879432917 (their finalize failed to record)"
+  },
+  "cachix_v3_gib": 1.5
 }
