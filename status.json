@@ -1,14 +1,14 @@
 {
   "last": {
-    "built": 22,
+    "built": 0,
     "failed": 0,
     "skipped": 0,
-    "remaining": 4565,
-    "capped": true,
-    "cachix_gib": 0.019,
-    "nixos_rev": "5457be3df48e97b6bd564ee0260d4266d3b26118",
-    "run": "https://github.com/janusz-bit/nixpkgs-v3/actions/runs/44952786162",
-    "mode": "cachix"
+    "remaining": 0,
+    "capped": false,
+    "cachix_gib": 0.0,
+    "nixos_rev": "2eac805e3a235eb017a54b387302549223460a88",
+    "run": "https://github.com/janusz-bit/nixpkgs-v3/actions/runs/44960035821",
+    "mode": "rpi"
   },
   "cachix_v3_gib": 1.994,
   "capped_rev": "5457be3df48e97b6bd564ee0260d4266d3b26118"
