@@ -63,10 +63,13 @@ _: {
         pubKey = "janusz-bit.cachix.org-1:4stTiufAF02BAXw8HNvYslAmUlPbZPIRhIGht0gSMoo=";
       };
       # customTop.nixCache of janusz-bit/nixos (modules/args.nix there); this
-      # flake has no nixos input, so the two values are repeated here.
+      # flake has no nixos input, so the values are repeated here. The cache
+      # has two signers: janusz-bit/nixos CI (publicKey) and this repository
+      # (v3PublicKey, the public half of NIX_CACHE_SIGNING_KEY here).
       rpiCache = {
         url = "https://raspberry-pi-4.tail1ea20e.ts.net:8444";
         publicKey = "janusz-bit-ci-1:sZOoPt8moauyLh35tiK6hcpnLfPySRm1C2IN/DffoVE=";
+        v3PublicKey = "janusz-bit-v3-1:nESt1tMO6HoJe3AcnJ5Gj+VTNyz2suKd7hJOp8vQBbk=";
       };
       nixosRepo = "janusz-bit/nixos";
       maxMachines = 16;
@@ -105,7 +108,7 @@ _: {
       # not stall every lookup.
       v3Config = ''
         extra-substituters = ${cache.url} ${rpiCache.url}
-        extra-trusted-public-keys = ${cache.pubKey} ${rpiCache.publicKey}
+        extra-trusted-public-keys = ${cache.pubKey} ${rpiCache.publicKey} ${rpiCache.v3PublicKey}
         extra-system-features = gccarch-x86-64 gccarch-x86-64-v2 gccarch-x86-64-v3
         connect-timeout = 5
       '';

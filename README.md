@@ -111,9 +111,12 @@ CachyOS kernel, so it cannot be the store.
 The durable store is the tailnet cache of janusz-bit/nixos on the RPi
 (`hosts/nix-cache.nix` there): a plain binary cache behind nginx, 954 GB SSD
 with about 747 GB free, reachable only in the tailnet at
-`https://raspberry-pi-4.tail1ea20e.ts.net:8444`. CI signs (key
-`janusz-bit-ci-1`, secret `NIX_CACHE_SIGNING_KEY`), the RPi only stores
-files. That is room for 10 or more worlds; its `nix-cache-gc` drops entries
+`https://raspberry-pi-4.tail1ea20e.ts.net:8444`. CI signs, the RPi only
+stores files: this repository with its own key `janusz-bit-v3-1` (secret
+`NIX_CACHE_SIGNING_KEY` here), which only the laptop trusts
+(`customTop.nixCache.v3PublicKey` in janusz-bit/nixos), and janusz-bit/nixos
+CI with `janusz-bit-ci-1`. Both push with the same password (nginx user
+`ci`). That is room for 10 or more worlds; its `nix-cache-gc` drops entries
 90 days after upload.
 
 | store | what is in it | who writes |
@@ -215,17 +218,25 @@ its marker when the build workflow is dispatched with `nixos_ref=<branch>`.
 
 ## One-time steps (user)
 
-On the laptop, which has the RPi cache secrets of janusz-bit/nixos:
+Done on 2026-11-21; repeat only to rotate a credential.
 
-1. Secrets on janusz-bit/nixpkgs-v3, the same values as on janusz-bit/nixos:
-   `gh secret set NIX_CACHE_SIGNING_KEY --repo janusz-bit/nixpkgs-v3` and
-   `gh secret set NIX_CACHE_PUSH_PASSWORD --repo janusz-bit/nixpkgs-v3`
-   (both read from stdin, so nothing lands in the shell history).
-2. Tailscale admin console, Trust credentials: an OpenID Connect credential
+1. Tailscale admin console, Trust credentials: an OpenID Connect credential
    for GitHub Actions with subject `repo:janusz-bit/nixpkgs-v3:*`, scope
-   `auth_keys`, tag `tag:ci`; its client id and audience go to
-   `TS_OAUTH_CLIENT_ID` and `TS_AUDIENCE` of this repository. The tailnet
-   policy already lets `tag:ci` reach only `tcp:8444` on the RPi.
+   `auth_keys`, tag `tag:ci`. The tailnet policy already lets `tag:ci` reach
+   only `tcp:8444` on the RPi.
+2. On the laptop (the signing key never passes through the RPi), one script
+   that reads the credential's client id and audience into
+   `TS_OAUTH_CLIENT_ID` and `TS_AUDIENCE`, generates the signing key
+   (`nix key generate-secret --key-name janusz-bit-v3-1`) into
+   `NIX_CACHE_SIGNING_KEY` and a new push password into
+   `NIX_CACHE_PUSH_PASSWORD` of both repositories, and encrypts
+   `ci:<openssl passwd -6>` to the host keys of janusz-bit/nixos
+   (`modules/_secrets/nix-cache-htpasswd.age` there). Every value goes
+   to `gh secret set` on stdin and nothing is printed but the public key.
+   The password is shared because nginx has one push account and the old
+   password exists only as a write-only GitHub secret. A new public key goes
+   to `rpiCache.v3PublicKey` here and `customTop.nixCache.v3PublicKey` there;
+   the laptop needs `update` before it accepts paths signed with it.
 3. Optional repository variables: `RPI_LIMIT_RATE` (curl rate, default `4M`;
    lower it if the RPi drops off Wi-Fi during pushes), `CACHIX_SHARE_GB`
    (default 1), `RPI_QUOTA_GB` (default 600).
