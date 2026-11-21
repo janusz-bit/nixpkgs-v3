@@ -7,11 +7,16 @@ Subcommands, in the order the build workflow runs them:
             N runners (critical path first, a runner prefers the one that
             built a node's heaviest input). Nodes that cannot finish inside
             the job budget are deferred to the next run; nodes that could
-            never finish in one job are reported as too big.
+            never finish in one job are reported as too big. With --share-gb
+            the outputs that other runners of the same run need ("shares")
+            are capped, and with --durable a second dry run against the
+            durable store alone lists what is still missing there.
   execute   one runner: build its share in plan order, at most --jobs builds
             at a time, and wait for inputs that other runners build until
-            their outputs appear in the binary cache (the cachix daemon of
-            the job pushes every finished path right away).
+            their outputs appear in the shared cache (pushed right away by the
+            cachix daemon, or per share with --share-cache). --export copies
+            every finished output to a local binary cache directory for the
+            push to the durable store.
   finalize  merge the measured build times, count built, failed and
             remaining nodes, and write the job summary.
 
@@ -132,12 +137,12 @@ def read_drv(path):
 
 # --- nix helpers -------------------------------------------------------------
 
-def dry_run(drv):
+def dry_run(drv, substituters=None):
     """Return (to_build, to_fetch) store paths of realising drv."""
-    proc = subprocess.run(
-        ["nix-store", "--realise", "--dry-run", drv],
-        capture_output=True, text=True, check=False,
-    )
+    cmd = ["nix-store", "--realise", "--dry-run", drv]
+    if substituters is not None:
+        cmd += ["--option", "substituters", substituters]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         log(proc.stderr)
         raise SystemExit("dry run failed")
@@ -264,7 +269,7 @@ def build_graph(to_build, local_only=None):
     return drvs, nodes
 
 
-def schedule(nodes, machines, budget, delay, size_cap=None):
+def schedule(nodes, machines, budget, delay, size_cap=None, share_cap=None):
     children = {d: [] for d in nodes}
     for d, info in nodes.items():
         for dep in info["deps"]:
@@ -295,28 +300,41 @@ def schedule(nodes, machines, budget, delay, size_cap=None):
     lists = [[] for _ in range(machines)]
     toobig, deferred = [], []
     pushed = 0
+    shared, shared_bytes = set(), 0
     while ready:
         _, d = heapq.heappop(ready)
         info = nodes[d]
         if info["est"] > budget:
             toobig.append(d)
             continue
-        best = None
         heaviest = max(info["deps"], key=lambda x: nodes[x]["est"], default=None)
+        candidates = []
         for m in range(machines):
             start = free[m]
             for dep in info["deps"]:
                 lag = 0 if nodes[dep]["machine"] == m else delay
                 start = max(start, nodes[dep]["finish"] + lag)
             prefer = heaviest is not None and nodes[heaviest]["machine"] == m
-            key = (start, not prefer, m)
-            if best is None or key < best[0]:
-                best = (key, m, start)
-        _, m, start = best
+            candidates.append(((start, not prefer, m), m, start))
+        # The earliest runner whose new shares still fit the share cap; with
+        # the cap reached, co-locating with the inputs is the only option.
+        best = None
+        for _key, m, start in sorted(candidates):
+            new = {dep for dep in info["deps"] if nodes[dep]["machine"] != m and dep not in shared}
+            new_bytes = sum(nodes[dep]["bytes"] for dep in new)
+            if share_cap is None or shared_bytes + new_bytes <= share_cap:
+                best = (m, start, new, new_bytes)
+                break
+        if best is None:
+            deferred.append(d)
+            continue
+        m, start, new, new_bytes = best
         if start + info["est"] > budget or (size_cap is not None and pushed + info["bytes"] > size_cap):
             deferred.append(d)
             continue
         pushed += info["bytes"]
+        shared |= new
+        shared_bytes += new_bytes
         info.update(machine=m, start=start, finish=start + info["est"])
         free[m] = info["finish"]
         lists[m].append(d)
@@ -324,6 +342,8 @@ def schedule(nodes, machines, budget, delay, size_cap=None):
             missing[c] -= 1
             if missing[c] == 0:
                 heapq.heappush(ready, (-bottom[c], c))
+    for d in shared:
+        nodes[d]["share"] = True
     blocked = [d for d, info in nodes.items() if info.get("machine") is None and d not in deferred and d not in toobig]
     return lists, toobig, deferred, blocked, bottom
 
@@ -348,7 +368,12 @@ def cmd_plan(args):
     # chain instead of thrashing; the summary says what to change.
     capped = world_bytes > 0.8 * quota
     size_cap = 0.4 * quota if capped else None
-    lists, toobig, deferred, blocked, bottom = schedule(nodes, args.machines, args.budget, args.delay, size_cap)
+    if capped and args.cap_gb is not None:
+        size_cap = max(args.cap_gb, 0) * 2**30
+    share_cap = args.share_gb * 2**30 if args.share_gb is not None else None
+    lists, toobig, deferred, blocked, bottom = schedule(
+        nodes, args.machines, args.budget, args.delay, size_cap, share_cap)
+    durable = durable_gap(args, drvs, nodes) if args.durable else None
 
     critical = max(bottom.values(), default=0)
     plan = {
@@ -358,13 +383,14 @@ def cmd_plan(args):
         "cache": args.cache,
         "machines": [{"index": m, "nodes": lst} for m, lst in enumerate(lists) if lst],
         "nodes": {
-            d: {k: info.get(k) for k in ("name", "outputs", "deps", "est", "measured", "machine", "finish")}
+            d: {k: info.get(k) for k in ("name", "outputs", "deps", "est", "measured", "machine", "finish", "share")}
             for d, info in nodes.items()
         },
         "toobig": toobig,
         "deferred": deferred,
         "blocked": blocked,
         "capped": capped,
+        "durable": durable,
         "stats": {
             "to_build": len(to_build),
             "trivial": len(to_build) - len(nodes),
@@ -376,6 +402,7 @@ def cmd_plan(args):
             "to_fetch": len(to_fetch),
             "world_gib": round(world_bytes / 2**30, 1),
             "quota_gib": args.quota_gb,
+            "share_gib": round(sum(i["bytes"] for i in nodes.values() if i.get("share")) / 2**30, 2),
         },
     }
     with open(args.out, "w", encoding="utf-8") as f:
@@ -391,7 +418,12 @@ def cmd_plan(args):
         f"- estimate for everything left: {s['est_runner_hours_total']} runner-hours "
         f"({s['est_cpu_hours_total']} CPU-hours), critical path {s['critical_path_hours']} h",
     ]
-    lines.append(f"- estimated compressed size of everything left: {s['world_gib']} GiB; cache quota {args.quota_gb} GiB")
+    lines.append(f"- estimated compressed size of everything left: {s['world_gib']} GiB; durable store quota {args.quota_gb} GiB")
+    if share_cap is not None:
+        lines.append(f"- shared through cachix this run: {s['share_gib']} GiB estimated (cap {args.share_gb} GiB)")
+    if durable is not None:
+        lines.append(f"- missing from the durable store: {durable['missing']} derivations, "
+                     f"{len(durable['repush'])} outputs only in another cache (pushed again)")
     if capped:
         lines += [
             "",
@@ -408,7 +440,28 @@ def cmd_plan(args):
     lines += ["", "| largest estimates | h |", "|---|---|"]
     lines += [f"| `{i['name']}` | {i['est'] / 3600:.2f} |" for i in top]
     summary(args.summary, "\n".join(lines))
-    print(json.dumps({"matrix": matrix, "real": s["real"], "scheduled": s["scheduled"], "capped": capped}))
+    print(json.dumps({"matrix": matrix, "real": s["real"], "scheduled": s["scheduled"], "capped": capped,
+                      "durable_missing": durable["missing"] if durable else None}))
+
+
+def durable_gap(args, drvs, nodes):
+    """What the durable store (args.durable substituters) still lacks.
+
+    missing counts the non-trivial derivations a machine with only these
+    substituters would build; repush lists the outputs among them that are
+    not to be built (another cache has them), for the push job to copy.
+    """
+    d_build, _ = dry_run(args.drv, args.durable)
+    pattern = re.compile(args.local_only) if args.local_only else None
+    missing, repush = 0, []
+    for d in d_build:
+        info = drvs.get(d) or read_drv(d)
+        if info["trivial"] or (pattern and pattern.search(info["name"])):
+            continue
+        missing += 1
+        if d not in nodes:
+            repush += info["outputs"]
+    return {"missing": missing, "repush": sorted(repush)}
 
 
 COMPRESSION = 0.35  # zstd NAR / NAR, roughly, for a mixed package set
@@ -508,6 +561,7 @@ class Runner:
             if ok:
                 sizes = path_info("auto", self.nodes[d]["outputs"])
                 entry["nar"] = sum(i.get("narSize", 0) for i in sizes.values())
+                entry["cachix"] = self.publish(d)
             if not ok:
                 entry["timeout"] = proc.returncode in (124, 137)
                 entry["log"] = tail(os.path.join(self.args.logs, f"{name}.log"), 60)
@@ -515,6 +569,19 @@ class Runner:
             log(f"[{self.state[d]}] {name} in {seconds}s")
             del self.running[d]
             self.save()
+
+    def publish(self, d):
+        """Push a share to the shared cache and export the output; True when
+        the output went to the shared cache (the daemon pushes every output
+        when there is no --share-cache)."""
+        outs = self.nodes[d]["outputs"]
+        to_cache = self.args.remote and not self.args.share_cache
+        if self.args.share_cache and self.nodes[d].get("share"):
+            run_quiet(["cachix", "push", self.args.share_cache, *outs], 1800)
+            to_cache = True
+        if self.args.export:
+            export_paths(self.args.export, outs, self.args.local_only)
+        return to_cache
 
     def save(self):
         """Results so far: a cancelled or timed-out job keeps what it measured."""
@@ -583,6 +650,57 @@ class Runner:
         summary(self.args.summary, "\n".join(lines))
 
 
+def export_paths(directory, outs, local_only):
+    """Copy outs (and the cheap intermediates they reference) to a local
+    binary cache directory, for the push job to take to the durable store.
+
+    nix copy into a binary cache needs the narinfo of every reference, and
+    the references come from elsewhere (cache.nixos.org, the shared cache,
+    earlier runs), so they get stub narinfos, as janusz-bit/nixos
+    nix-cache-push does; the push job drops every stub (URL: nar/stub).
+    Cheap intermediates are in no cache, so the ones an output references
+    at run time travel with it.
+    """
+    proc = subprocess.run(["nix", "path-info", "--recursive", "--json", "--json-format", "1", *outs],
+                          capture_output=True, text=True, check=False)
+    try:
+        closure = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        log(f"[warn] export: path-info failed: {proc.stderr.strip()[-300:]}")
+        return
+    pattern = re.compile(local_only) if local_only else None
+    send = set(outs) | {p for p in closure if pattern and pattern.search(p[len(STORE) + 33:])}
+    os.makedirs(directory, exist_ok=True)
+    for path, info in closure.items():
+        stub = os.path.join(directory, path[len(STORE):len(STORE) + 32] + ".narinfo")
+        if path in send or os.path.exists(stub):
+            continue
+        refs = " ".join(r[len(STORE):] for r in info.get("references", []))
+        with open(stub, "w", encoding="utf-8") as f:
+            f.write(f"StorePath: {path}\nURL: nar/stub\nCompression: none\n"
+                    f"NarHash: {info['narHash']}\nNarSize: {info['narSize']}\nReferences: {refs}\n")
+    # A stub of an earlier export may stand for a path that is sent now.
+    for path in send:
+        stub = os.path.join(directory, path[len(STORE):len(STORE) + 32] + ".narinfo")
+        try:
+            with open(stub, encoding="utf-8") as f:
+                if "URL: nar/stub\n" in f.read():
+                    os.remove(stub)
+        except OSError:
+            pass
+    run_quiet(["nix", "copy", "--no-recursive", "--to",
+               f"file://{directory}?compression=zstd&parallel-compression=true", *sorted(send)], 3600)
+
+
+def run_quiet(cmd, timeout):
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        if proc.returncode != 0:
+            log(f"[warn] {' '.join(cmd[:3])}: {proc.stderr.strip()[-400:]}")
+    except subprocess.TimeoutExpired:
+        log(f"[warn] {' '.join(cmd[:3])}: timed out")
+
+
 def tail(path, n):
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -604,6 +722,7 @@ def cmd_finalize(args):
     times.setdefault("pname", {})
     times.setdefault("nar", {})
     built = failed = skipped = 0
+    cachix_bytes = 0
     failures = []
     for path in args.results:
         for _d, r in load_json(path, {}).items():
@@ -613,6 +732,8 @@ def cmd_finalize(args):
                 times["pname"][pname(r["name"])] = r["seconds"]
                 if r.get("nar"):
                     times["nar"][r["name"]] = r["nar"]
+                    if r.get("cachix", True):
+                        cachix_bytes += r["nar"] * COMPRESSION
             elif r["status"] == "failed":
                 failed += 1
                 failures.append(r)
@@ -627,7 +748,7 @@ def cmd_finalize(args):
     real = plan.get("stats", {}).get("real", 0)
     remaining = max(real - built, 0)
     status = {"built": built, "failed": failed, "skipped": skipped, "remaining": remaining,
-              "capped": bool(plan.get("capped"))}
+              "capped": bool(plan.get("capped")), "cachix_gib": round(cachix_bytes / 2**30, 3)}
     lines = [
         "## World build",
         "",
@@ -819,6 +940,9 @@ def main():
     p.add_argument("--generic", help="baseline twin toplevel .drv, for size estimates")
     p.add_argument("--quota-gb", type=float, default=5, help="cachix storage of the plan")
     p.add_argument("--local-only", help="regex of names rebuilt where needed, never pushed")
+    p.add_argument("--share-gb", type=float, help="cap on outputs shared between runners of one run")
+    p.add_argument("--cap-gb", type=float, help="what a capped run may still push (default 40 %% of the quota)")
+    p.add_argument("--durable", help="substituters of the durable store, for the gap it still has")
     p.add_argument("--out", default="plan.json")
     p.add_argument("--summary", default=os.environ.get("GITHUB_STEP_SUMMARY"))
     p.set_defaults(func=cmd_plan)
@@ -830,6 +954,9 @@ def main():
     e.add_argument("--jobs", type=int, default=2)
     e.add_argument("--cores", type=int, default=4)
     e.add_argument("--remote", action=argparse.BooleanOptionalAction, default=True)
+    e.add_argument("--share-cache", help="cachix cache to push shares to (else the daemon pushes all)")
+    e.add_argument("--export", help="local binary cache directory for finished outputs")
+    e.add_argument("--local-only", help="regex of names exported with the outputs that reference them")
     e.add_argument("--logs", default="logs")
     e.add_argument("--results", default="results.json")
     e.add_argument("--summary", default=os.environ.get("GITHUB_STEP_SUMMARY"))

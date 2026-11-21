@@ -2,14 +2,15 @@
 
 The whole NixOS userspace built for **x86-64-v3**, with the build flags of
 the CachyOS v3 repositories, compiled on GitHub Actions and served from
-cachix (`janusz-bit.cachix.org`). Made for the laptop of
+the tailnet cache of janusz-bit/nixos on its Raspberry Pi (cachix only
+carries what runners hand each other). Made for the laptop of
 [janusz-bit/nixos](https://github.com/janusz-bit/nixos) (host `nixos`,
 i5-13450HX), but the module works for any x86-64-v3 NixOS host.
 
 ```nix
 # flake.nix of the system
 inputs.nixpkgs-v3.url = "github:janusz-bit/nixpkgs-v3";
-inputs.nixpkgs-v3.inputs.nixpkgs.follows = "nixpkgs";
+inputs.nixpkgs-v3.inputs.nixpkgs.follows = "nixpkgs"; # also flake-parts, import-tree, git-hooks-nix, github-actions-nix
 # host modules
 modules = [ inputs.nixpkgs-v3.nixosModules.default ];
 ```
@@ -32,7 +33,7 @@ Consumers set `follows` for `nixpkgs`, `flake-parts`, `import-tree`,
 | Platform | `modules/nixos.nix` (`nixosModules.default`) | `nixpkgs.hostPlatform = { system = "x86_64-linux"; gcc.arch = "x86-64-v3"; gcc.tune = "generic"; }`: cc-wrapper adds `-march=x86-64-v3 -mtune=generic` to every gcc, g++, gfortran and clang call, gcc itself is configured `--with-arch=x86-64-v3`, every derivation requires the system feature `gccarch-x86-64-v3`. |
 | Toolchains | `modules/_overlay/toolchain.nix` | nixpkgs has no v3 handling for Go or Rust: `GOAMD64=v3` is baked into every `go_1_N` (becomes the toolchain default), the rustc/rustdoc wrapper gets `-C target-cpu=x86-64-v3`. |
 | CachyOS parity | `modules/_overlay/cachyos.nix`, `modules/_data/parity.nix` | Per-package changes of the CachyOS-specific packages (python PGO, `-O3` for xz and sqlite); what is already equivalent or not ported, with reasons. |
-| Fallbacks | `modules/_overlay/fallbacks.nix` | A few leaf applications, Haskell, .NET and firmware from the baseline set (cache.nixos.org), each with its reason. |
+| Fallbacks | `modules/_overlay/fallbacks.nix` | A few leaf applications, Haskell, .NET, firmware and tzdata from the baseline set (cache.nixos.org), each with its reason. |
 | Flags as data | `modules/_data/flags.nix` (`lib.flags`) | CachyOS v3 makepkg flags, verbatim from `CachyOS/docker-makepkg` (`docker-makepkg-v3/makepkg.conf`, `rust.conf`). |
 
 Prior art checked: nixpkgs has no `pkgsx86_64_v3` variant (only
@@ -100,30 +101,61 @@ from the baseline set. qtwebengine is a library loaded into plasmashell
 one attempt, and a timeout marks it "too big" in every later plan (see
 [What remains](#what-remains)).
 
-### Cachix storage is the binding constraint
+### Storage: the RPi cache, with cachix only between runners
 
-The free cachix plan holds 5 GB. One v3 world is at least 29 GB compressed,
-realistically 40 to 60 GB (the lower bound misses half of the derivations),
-and every nixpkgs bump produces a new world. LRU eviction on a cache that is
-too small would evict paths of the build while it runs and make runners
-rebuild them.
+One v3 world is at least 29 GB compressed, realistically 40 to 60 GB (the
+lower bound misses half of the derivations), and every nixpkgs bump produces
+a new one. The free cachix plan holds 5 GB and also carries the laptop's
+CachyOS kernel, so it cannot be the store.
 
-So the planner reads the repository variable `CACHIX_QUOTA_GB` (default 5)
-and, while the estimated remaining world exceeds 80 % of it, builds one
-bounded share (40 % of the quota) once per janusz-bit/nixos revision and
-stops the chain, with the reason in the run summary. Source copies and vendored crates
-(`-src`, `-vendor`, `-source`) are never pushed (rebuilt in seconds where
-needed), and data without code (linux-firmware) comes from cache.nixos.org.
+The durable store is the tailnet cache of janusz-bit/nixos on the RPi
+(`hosts/nix-cache.nix` there): a plain binary cache behind nginx, 954 GB SSD
+with about 747 GB free, reachable only in the tailnet at
+`https://raspberry-pi-4.tail1ea20e.ts.net:8444`. CI signs (key
+`janusz-bit-ci-1`, secret `NIX_CACHE_SIGNING_KEY`), the RPi only stores
+files. That is room for 10 or more worlds; its `nix-cache-gc` drops entries
+90 days after upload.
 
-| cachix plan | holds |
-|---|---|
-| Free, 5 GB | the bootstrap and core libraries only; the chain stops itself |
-| Starter, 50 GiB | about one world; a nixpkgs bump evicts the previous one while building the next |
-| Standard, 250 GB | 4 to 5 generations: enough to keep the deployed world while the next one builds |
+| store | what is in it | who writes |
+|---|---|---|
+| RPi cache | every v3 output of the laptop's closure, plus what the closure takes from cachix (CachyOS kernel and friends) | job `rpi-push`, one per run, one path at a time, rate-limited |
+| cachix | only outputs that another runner of the same run waits for (`CACHIX_SHARE_GB`, default 1 GiB per run) | the builder that made it (`cachix push`) |
+| cache.nixos.org | the generic fallbacks | Hydra |
 
-After upgrading, set `CACHIX_QUOTA_GB` (Settings, Secrets and variables,
-Actions, Variables) to the plan size. Retention can stay LRU: what the laptop
-runs is re-fetched and so kept warm.
+How a run uses them:
+
+- Every runner joins the tailnet as an ephemeral `tag:ci` node (OIDC,
+  `tailscale/github-action`, as in janusz-bit/nixos) and has the RPi cache
+  as its last substituter (`connect-timeout = 5`): inputs from earlier runs
+  come from cachix if it still has them, else from the RPi.
+- Builders export every finished output to a local binary cache directory
+  (`v3ci execute --export`, stub narinfos for the references, the trick of
+  janusz-bit/nixos `nix-cache-push`) and upload it as artifact `export-<n>`
+  (kept 7 days).
+- `rpi-push` (concurrency group `rpi-push`, so never two at once, also across
+  runs) merges the exports, fetches what the plan found only in cachix
+  (`.durable.repush`), probes the link (32 MiB up and down, numbers in the
+  summary and in `ci-state:status.json` `.link`) and runs janusz-bit/nixos's
+  own `nix-cache-push` (re-exported by `ci/flake.nix` from its lock),
+  limited to `RPI_LIMIT_RATE` (default 4 MiB/s) through curl's config file.
+  The RPi is on Wi-Fi, and four parallel large uploads have dropped it off
+  the network for 12 minutes.
+- If the RPi is unreachable or a push stops, the run's id goes to
+  `.unpushed`; the next run builds nothing, pushes those exports first and
+  only then continues the chain. While the RPi is down nothing is built, so
+  no work is lost and nothing is rebuilt.
+- Without the RPi secrets the build falls back to cachix alone: at most 40 %
+  of `CACHIX_QUOTA_GB` (default 5) for the v3 world in all, counted over runs
+  in `.cachix_v3_gib` (runs 2 to 4 used about 1 GiB), then it stops with the
+  reason in the summary. No fully-cached marker in that mode.
+
+Source copies and vendored crates (`-src`, `-vendor`, `-source`) are never
+pushed (rebuilt in seconds where needed), and data without code
+(linux-firmware, tzdata) comes from cache.nixos.org.
+
+Not measured yet: how fast runners download from the RPi (the RPi's upload
+over the home line and Tailscale). `rpi-push` records it on every run;
+until it is known to be fast, cachix stays the first place runners look.
 
 ## The world build (CI)
 
@@ -145,14 +177,17 @@ pushes here and by hand:
    moves `/nix` to the larger `/mnt` disk, evaluates the same target (and
    fails if the drvPath differs from the plan), then builds its share in plan
    order, two builds at a time. An input that another runner builds is
-   waited for until its outputs appear in cachix; the cachix daemon pushes
-   every finished path immediately. Builds still running at the deadline are
+   waited for until its outputs appear in cachix, where the builder pushes
+   exactly those shares (without the RPi cache, the cachix daemon pushes
+   every finished path). Builds still running at the deadline are
    stopped before the 6 h job limit.
-3. **finalize**: merges measured build times and NAR sizes into
+3. **rpi-push**: takes the run's exports to the RPi cache (see Storage).
+4. **finalize**: merges measured build times and NAR sizes into
    `build-times.json` on branch `ci-state`, writes built/failed/skipped
    counts and failure logs to the summary and dispatches the next run while
-   the last one built something (at most 40 in a chain).
-4. **marker**: when a plan finds nothing left to build, tags
+   the last one built something and, with the RPi cache, its push completed
+   (at most 40 in a chain).
+5. **marker**: when the durable store lacks nothing, tags
    `cached/nixos-<rev>` and writes `ci-state:status.json`.
 
 Without the `CACHIX_AUTH_TOKEN` secret everything still runs, on one runner
@@ -171,10 +206,31 @@ rev=$(git ls-remote https://github.com/janusz-bit/nixos refs/heads/master | cut 
 git ls-remote --exit-code https://github.com/janusz-bit/nixpkgs-v3 "refs/tags/cached/nixos-$rev"
 ```
 
-Exit status 0: every non-trivial path of that revision's v3 laptop closure is
-in `janusz-bit.cachix.org`; `update` substitutes it and builds only the
-trivial derivations (seconds). A branch of janusz-bit/nixos gets its marker
-when the build workflow is dispatched with `nixos_ref=<branch>`.
+Exit status 0: a machine with only cache.nixos.org and the RPi cache as
+substituters builds nothing but the trivial derivations of that revision's
+v3 laptop closure (the plan's second dry run, `--durable`). cachix is not
+part of the promise. `update` on the laptop, which has the RPi cache as a
+substituter, then substitutes everything. A branch of janusz-bit/nixos gets
+its marker when the build workflow is dispatched with `nixos_ref=<branch>`.
+
+## One-time steps (user)
+
+On the laptop, which has the RPi cache secrets of janusz-bit/nixos:
+
+1. Secrets on janusz-bit/nixpkgs-v3, the same values as on janusz-bit/nixos:
+   `gh secret set NIX_CACHE_SIGNING_KEY --repo janusz-bit/nixpkgs-v3` and
+   `gh secret set NIX_CACHE_PUSH_PASSWORD --repo janusz-bit/nixpkgs-v3`
+   (both read from stdin, so nothing lands in the shell history).
+2. Tailscale admin console, Trust credentials: an OpenID Connect credential
+   for GitHub Actions with subject `repo:janusz-bit/nixpkgs-v3:*`, scope
+   `auth_keys`, tag `tag:ci`; its client id and audience go to
+   `TS_OAUTH_CLIENT_ID` and `TS_AUDIENCE` of this repository. The tailnet
+   policy already lets `tag:ci` reach only `tcp:8444` on the RPi.
+3. Optional repository variables: `RPI_LIMIT_RATE` (curl rate, default `4M`;
+   lower it if the RPi drops off Wi-Fi during pushes), `CACHIX_SHARE_GB`
+   (default 1), `RPI_QUOTA_GB` (default 600).
+4. `gh workflow run build.yml --repo janusz-bit/nixpkgs-v3` starts the chain;
+   the first run's `rpi-push` summary shows the measured link speeds.
 
 ## Proof
 

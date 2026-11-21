@@ -47,6 +47,11 @@ in
     # Firmware blobs: data, no code runs on the CPU; 2 GB in cachix for
     # nothing.
     linux-firmware
+    # Zone data: its only code is zic/zdump, and the v3 rebuild re-runs the
+    # check now.ck against the wall clock, which fails once the data's
+    # "from now on" statements age past the build date (tzdata 2026f on
+    # 2026-11-21: 127 dependents blocked).
+    tzdata
     # GHC ignores -march.
     haskell
     haskellPackages

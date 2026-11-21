@@ -16,10 +16,19 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
             access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
-            extra-substituters = https://janusz-bit.cachix.org
-            extra-trusted-public-keys = janusz-bit.cachix.org-1:4stTiufAF02BAXw8HNvYslAmUlPbZPIRhIGht0gSMoo=
+            extra-substituters = https://janusz-bit.cachix.org https://raspberry-pi-4.tail1ea20e.ts.net:8444
+            extra-trusted-public-keys = janusz-bit.cachix.org-1:4stTiufAF02BAXw8HNvYslAmUlPbZPIRhIGht0gSMoo= janusz-bit-ci-1:sZOoPt8moauyLh35tiK6hcpnLfPySRm1C2IN/DffoVE=
             extra-system-features = gccarch-x86-64 gccarch-x86-64-v2 gccarch-x86-64-v3
+            connect-timeout = 5
           install_url: https://releases.nixos.org/nix/nix-2.35.6/install
+      - continue-on-error: true
+        if: always()
+        name: Connect to the tailnet
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c
+        with:
+          audience: ${{ secrets.TS_AUDIENCE }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          tags: tag:ci
       - id: ready
         name: Are the sample packages cached
         run: |
@@ -58,3 +67,4 @@ name: proof
         required: false
 permissions:
   contents: read
+  id-token: write

@@ -973,7 +973,7 @@ CachyOS rebuilds these Arch PKGBUILDs with its v3 flags; here they get the globa
 | tpm2-tools | tpm2-tools | yes | - |
 | tpm2-tss | tpm2-tss | yes | - |
 | twolame | twolame | yes | - |
-| tzdata | tzdata | yes | - |
+| tzdata | tzdata | no | generic: zone data; the v3 rebuild re-runs a wall-clock check (now.ck) that fails once the data ages past its build date |
 | uchardet | uchardet | yes | - |
 | unbound | unbound | yes | - |
 | union | union | yes | - |

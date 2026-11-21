@@ -55,7 +55,8 @@
     libreoffice-qt = "5-7 h on 4 vCPUs; leaf application";
     freecad-qt6 = "pulls qtwebengine through pyside6; leaf application";
     pinta = ".NET application: RyuJIT emits code for the running CPU, and the source-built .NET SDK behind it takes 3+ h";
-    linux-firmware = "firmware blobs, no CPU code; a v3 copy would only take 2 GB of cachix";
+    linux-firmware = "firmware blobs, no CPU code; a v3 copy would only take 2 GB of cache";
+    tzdata = "zone data; the v3 rebuild re-runs a wall-clock check (now.ck) that fails once the data ages past its build date";
     haskell = "haskellPackages, pandoc, shellcheck: GHC's code generator ignores -march, so v3 would rebuild identical code; separate processes and mostly build tools";
   };
 }

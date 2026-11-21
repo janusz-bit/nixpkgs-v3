@@ -48,9 +48,17 @@
       v3 = v3Host.config.system.build.toplevel;
       generic = if importsModule then null else host.config.system.build.toplevel;
 
-      packages.x86_64-linux = import ./proof.nix {
-        inherit lib generic v3;
-        inherit (tools) isa-scan;
-      };
+      # nix-cache-push of janusz-bit/nixos (hosts/nix-cache.nix): the RPi
+      # cache's own push, reused rather than forked. The workflows run it from
+      # this lock (no --override-input), so a branch of janusz-bit/nixos under
+      # test cannot change the uploader.
+      packages.x86_64-linux =
+        import ./proof.nix {
+          inherit lib generic v3;
+          inherit (tools) isa-scan;
+        }
+        // {
+          inherit (nixos.packages.x86_64-linux) nix-cache-push;
+        };
     };
 }

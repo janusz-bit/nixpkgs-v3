@@ -1,6 +1,6 @@
 # Cheap checks beside checks.<system>.pre-commit (formatting, lints and
 # generated workflows, modules/default.nix): the CI tools build (flake8 on
-# v3ci) and, on x86_64, evaluation-only assertions that the v3 package set
+# v3ci, shellcheck on the ci-* steps) and, on x86_64, evaluation-only assertions that the v3 package set
 # gets what the overlay promises. Nothing here builds v3 packages; the ELF
 # and benchmark proofs that need them are in ci/.
 #
@@ -41,7 +41,13 @@ in
     in
     {
       checks = {
-        inherit (config.packages) v3ci isa-scan;
+        inherit (config.packages)
+          v3ci
+          isa-scan
+          ci-plan
+          ci-state
+          ci-rpi-push
+          ;
       }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isx86_64 { inherit toolchain; };
     };
