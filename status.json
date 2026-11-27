@@ -7,7 +7,7 @@
     "capped": false,
     "cachix_gib": 0.0,
     "nixos_rev": "b2cf9ad1232c19212bfec903732a146c5b4f2a02",
-    "run": "https://github.com/janusz-bit/nixpkgs-v3/actions/runs/45917840971",
+    "run": "https://github.com/janusz-bit/nixpkgs-v3/actions/runs/46011402993",
     "mode": "rpi"
   },
   "cachix_v3_gib": 1.994,
